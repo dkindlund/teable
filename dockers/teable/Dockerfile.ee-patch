@@ -1,0 +1,47 @@
+# Dockerfile to patch official Teable EE image with Prisma timeout fix
+# This uses the official enterprise image and only replaces the patched files
+
+###################################################################
+# Stage 1: Build only the patched Prisma package                 #
+###################################################################
+FROM node:20.9.0-bookworm AS builder
+
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+RUN corepack enable
+
+WORKDIR /workspace
+
+# Copy workspace configuration files
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
+
+# Copy the db-main-prisma package
+COPY packages/db-main-prisma ./packages/db-main-prisma
+
+# Copy other packages that db-main-prisma might depend on for types
+COPY packages/core ./packages/core
+COPY packages/common-i18n ./packages/common-i18n
+
+# Install dependencies for db-main-prisma only (skip prepare/postinstall scripts)
+RUN pnpm install --filter @teable/db-main-prisma --frozen-lockfile --ignore-scripts
+
+# Generate Prisma client
+RUN cd packages/db-main-prisma && pnpm prisma-generate --schema ./prisma/postgres/schema.prisma
+
+# Build the patched package
+RUN cd packages/db-main-prisma && pnpm build
+
+###################################################################
+# Stage 2: Layer patch onto official EE image                    #
+###################################################################
+FROM ghcr.io/teableio/teable:latest
+
+# Copy the patched files with proper ownership
+# The official EE image has packages under /app/community/ directory
+COPY --from=builder --chown=nodejs:nodejs \
+    /workspace/packages/db-main-prisma/dist/prisma.service.js \
+    /app/community/packages/db-main-prisma/dist/prisma.service.js
+
+COPY --from=builder --chown=nodejs:nodejs \
+    /workspace/packages/db-main-prisma/dist/prisma.service.d.ts \
+    /app/community/packages/db-main-prisma/dist/prisma.service.d.ts
